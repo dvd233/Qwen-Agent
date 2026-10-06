@@ -33,13 +33,34 @@ jobs:
       GIT_TERMINAL_PROMPT: '0'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
+      - name: Set up complete CPython 3.12
+        id: setup_python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+          check-latest: false
+
       - name: Fetch public validation and exact feature source
         shell: bash
+        env:
+          VALIDATION_PYTHON: ${{ steps.setup_python.outputs.python-path }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$CANDIDATE_SHA" = 014784d0ae33d91375098e91d16c42077d8895ff
-          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          "$VALIDATION_PYTHON" - <<'PYTHON'
+          import lib2to3
+          import sys
+          import sysconfig
+          from lib2to3.pgen2 import tokenize
+          from pathlib import Path
+          assert sys.implementation.name == 'cpython'
+          assert sys.version_info[:2] == (3, 12), sys.version
+          assert Path(lib2to3.__file__).resolve().is_relative_to(Path(sysconfig.get_path('stdlib')).resolve())
+          print('Complete CPython:', sys.executable, sys.version)
+          print('YAPF stdlib dependency:', tokenize.__file__)
+          PYTHON
           git init "$RUNNER_TEMP/validation"
           git -C "$RUNNER_TEMP/validation" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
           git -C "$RUNNER_TEMP/validation" fetch --depth=1 origin "$GITHUB_SHA"
@@ -50,18 +71,21 @@ jobs:
           git -C "$RUNNER_TEMP/feature" fetch --depth=2 origin "$CANDIDATE_SHA"
           git -C "$RUNNER_TEMP/feature" checkout --detach FETCH_HEAD
           git -C "$RUNNER_TEMP/feature" fetch --depth=1 https://github.com/QwenLM/Qwen-Agent.git 31a4d36d123688581a9e9744427272b33ce940e0
-          python3 "$RUNNER_TEMP/validation/harness/verify_source.py" \
+          "$VALIDATION_PYTHON" "$RUNNER_TEMP/validation/harness/verify_source.py" \
             --repo "$RUNNER_TEMP/feature" --candidate-sha "$CANDIDATE_SHA"
           mkdir "$RUNNER_TEMP/baseline"
           git -C "$RUNNER_TEMP/feature" archive 31a4d36d123688581a9e9744427272b33ce940e0 | tar -x -C "$RUNNER_TEMP/baseline"
-          python3 "$RUNNER_TEMP/validation/harness/test_result_checker.py"
+          "$VALIDATION_PYTHON" "$RUNNER_TEMP/validation/harness/test_result_checker.py"
 
       - name: Install hash-pinned official PyPI dependencies in a clean venv
         shell: bash
+        env:
+          VALIDATION_PYTHON: ${{ steps.setup_python.outputs.python-path }}
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/venv"
+          "$VALIDATION_PYTHON" -m venv "$RUNNER_TEMP/venv"
           grep -Fx 'include-system-site-packages = false' "$RUNNER_TEMP/venv/pyvenv.cfg"
+          "$RUNNER_TEMP/venv/bin/python" -c 'import sys; from lib2to3.pgen2 import tokenize; assert sys.version_info[:2] == (3, 12); print("Venv stdlib dependency:", tokenize.__file__)'
           "$RUNNER_TEMP/venv/bin/python" -m pip --isolated install \
             --index-url https://pypi.org/simple --require-hashes --only-binary=:all: --no-cache-dir --disable-pip-version-check \
             --report "$RUNNER_TEMP/bootstrap-install.json" \
@@ -73,9 +97,11 @@ jobs:
 
       - name: Verify cold local vocabulary, exact baseline failures, candidate tests and lint
         shell: bash
+        env:
+          VALIDATION_PYTHON: ${{ steps.setup_python.outputs.python-path }}
         run: |
           set -euo pipefail
-          python3 "$RUNNER_TEMP/validation/harness/run_validation.py" \
+          "$VALIDATION_PYTHON" "$RUNNER_TEMP/validation/harness/run_validation.py" \
             --python "$RUNNER_TEMP/venv/bin/python" \
             --candidate "$RUNNER_TEMP/feature" --baseline "$RUNNER_TEMP/baseline" \
             --out "$RUNNER_TEMP/results" --profile "$PROFILE" --candidate-sha "$CANDIDATE_SHA"
