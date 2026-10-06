@@ -1,0 +1,90 @@
+name: Qwen tool-result metadata validation
+
+on:
+  push:
+    branches:
+      - validation/qwen-tool-metadata-20261006
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact published feature commit SHA (40 lowercase hexadecimal characters)
+        required: true
+        default: 014784d0ae33d91375098e91d16c42077d8895ff
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: qwen-truncation-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || '014784d0ae33d91375098e91d16c42077d8895ff' }}
+  cancel-in-progress: false
+
+jobs:
+  source-bound-validation:
+    if: github.repository == 'dvd233/Qwen-Agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [current, gui, minimum]
+    env:
+      CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || '014784d0ae33d91375098e91d16c42077d8895ff' }}
+      PROFILE: ${{ matrix.profile }}
+      GIT_TERMINAL_PROMPT: '0'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Fetch public validation and exact feature source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$CANDIDATE_SHA" = 014784d0ae33d91375098e91d16c42077d8895ff
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          git init "$RUNNER_TEMP/validation"
+          git -C "$RUNNER_TEMP/validation" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C "$RUNNER_TEMP/validation" fetch --depth=1 origin "$GITHUB_SHA"
+          git -C "$RUNNER_TEMP/validation" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/validation" rev-parse HEAD)" = "$GITHUB_SHA"
+          git init "$RUNNER_TEMP/feature"
+          git -C "$RUNNER_TEMP/feature" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C "$RUNNER_TEMP/feature" fetch --depth=2 origin "$CANDIDATE_SHA"
+          git -C "$RUNNER_TEMP/feature" checkout --detach FETCH_HEAD
+          git -C "$RUNNER_TEMP/feature" fetch --depth=1 https://github.com/QwenLM/Qwen-Agent.git 31a4d36d123688581a9e9744427272b33ce940e0
+          python3 "$RUNNER_TEMP/validation/harness/verify_source.py" \
+            --repo "$RUNNER_TEMP/feature" --candidate-sha "$CANDIDATE_SHA"
+          mkdir "$RUNNER_TEMP/baseline"
+          git -C "$RUNNER_TEMP/feature" archive 31a4d36d123688581a9e9744427272b33ce940e0 | tar -x -C "$RUNNER_TEMP/baseline"
+          python3 "$RUNNER_TEMP/validation/harness/test_result_checker.py"
+
+      - name: Install hash-pinned official PyPI dependencies in a clean venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          grep -Fx 'include-system-site-packages = false' "$RUNNER_TEMP/venv/pyvenv.cfg"
+          "$RUNNER_TEMP/venv/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple --require-hashes --only-binary=:all: --no-cache-dir --disable-pip-version-check \
+            --report "$RUNNER_TEMP/bootstrap-install.json" \
+            -r "$RUNNER_TEMP/validation/requirements/requirements-bootstrap.lock"
+          "$RUNNER_TEMP/venv/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple --require-hashes --no-build-isolation --no-cache-dir --disable-pip-version-check \
+            --report "$RUNNER_TEMP/runtime-install.json" \
+            -r "$RUNNER_TEMP/validation/requirements/requirements-$PROFILE.lock"
+
+      - name: Verify cold local vocabulary, exact baseline failures, candidate tests and lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/validation/harness/run_validation.py" \
+            --python "$RUNNER_TEMP/venv/bin/python" \
+            --candidate "$RUNNER_TEMP/feature" --baseline "$RUNNER_TEMP/baseline" \
+            --out "$RUNNER_TEMP/results" --profile "$PROFILE" --candidate-sha "$CANDIDATE_SHA"
+          {
+            echo '### Source-bound offline validation'
+            echo "Feature commit: $CANDIDATE_SHA"
+            echo 'Tree: 1b98155da4d11a037421d190aa612504414505ab'
+            echo "Dependency profile: $PROFILE"
+            echo 'Baseline: exact 7 routing-metadata/ID failures and 9 passes; candidate: 22 passes.'
+            echo 'Cold import read only the repository vocabulary; real provider tests were excluded.'
+            echo 'Python socket/process guards and fake transport are not OS-level network isolation.'
+          } >> "$GITHUB_STEP_SUMMARY"

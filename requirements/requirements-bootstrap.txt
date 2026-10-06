@@ -1,0 +1,5 @@
+# Exact clean Linux x86_64 / CPython 3.12 dependency closure.
+packaging==26.3
+pip==25.3
+setuptools==84.0.0
+wheel==0.48.0
